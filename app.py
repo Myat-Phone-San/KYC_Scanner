@@ -714,7 +714,7 @@ def render_dl_results(data: Dict[str, Any]):
     col_en, col_my = st.columns(2)
     
     with col_en:
-        st.subheader("Latin Script (English) Fields")
+        st.subheader("English Fields")
         st.table([
             ("License No", data.get("license_no", "N/A")),
             ("Name", data.get("name", "N/A")),
