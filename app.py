@@ -9,10 +9,11 @@ import pandas as pd
 import difflib 
 from datetime import date
 from typing import Dict, Any, List, Optional
-from PIL import Image, ImageEnhance, ExifTags # Import PIL components
+from PIL import Image, ImageEnhance, ExifTags 
 
 # --- 0. Configuration and Initialization ---
 
+# Set Streamlit page configuration before any other function is called
 st.set_page_config(
     page_title="🛂 Unified KYC Document Extractor (AI IDP)",
     layout="wide"
@@ -26,15 +27,13 @@ except KeyError:
     # Fallback: Check environment variables for local testing
     API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-if not API_KEY:
-    st.error("Error: GEMINI_API_KEY not found in Streamlit Secrets or environment variables. Please configure your key.")
-    st.stop()
-    
 # The URL for the Gemini API model endpoint
 API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={API_KEY}"
     
 # --- Session State Initialization ---
 # Initialize session state for all shared data across document types
+# The 'document_mode' tracks which document type the current 'extracted_data' belongs to
+if 'document_mode' not in st.session_state: st.session_state['document_mode'] = None
 if 'extracted_data' not in st.session_state: st.session_state['extracted_data'] = None
 if 'original_data' not in st.session_state: st.session_state['original_data'] = None
 if 'accuracy_score' not in st.session_state: st.session_state['accuracy_score'] = None
@@ -42,8 +41,24 @@ if 'enhanced_image_bytes' not in st.session_state: st.session_state['enhanced_im
 if 'uploaded_file_bytes' not in st.session_state: st.session_state['uploaded_file_bytes'] = None
 if 'current_image_bytes' not in st.session_state: st.session_state['current_image_bytes'] = None
 if 'uploaded_file_name' not in st.session_state: st.session_state['uploaded_file_name'] = None
+if 'current_document_selection' not in st.session_state: st.session_state['current_document_selection'] = 'None'
+
+
+def reset_session_state_for_new_mode():
+    """Clears all previous extraction data when the document mode is switched."""
+    st.session_state['extracted_data'] = None
+    st.session_state['original_data'] = None
+    st.session_state['accuracy_score'] = None
+    st.session_state['enhanced_image_bytes'] = None
+    st.session_state['uploaded_file_bytes'] = None
+    st.session_state['current_image_bytes'] = None
+    st.session_state['uploaded_file_name'] = None
+    # Update the document mode tracker
+    st.session_state['document_mode'] = st.session_state['current_document_selection']
+
 
 # --- 1. Schemas and Prompts (Unified) ---
+# (Schemas and Prompts remain the same for brevity, as they were correct in the previous version)
 
 # --- NRC Schema and Prompt ---
 NRC_JSON_SCHEMA = {
@@ -131,7 +146,7 @@ PP_EXTRACTION_SCHEMA = {
         "authority": {"type": "string", "description": "The issuing authority (e.g., MOHA, YANGON)."},
         "mrz_full_string": {"type": "string", "description": "The two lines of the Machine Readable Zone (MRZ) combined into one string, separated by a space."},
         "passport_no_checksum": {"type": "string", "description": "The single checksum digit corresponding to the Passport No in the MRZ."},
-        "extraction_confidence": {"type": "number", "description": "The model's self-assessed confidence score for the entire extraction, from 0.0 (low) to 1.0 (high)."}
+        "extraction_confidence": {"type": "number", "description": "The model's self-assessed confidence score for the entire extraction, from 0.0 to 1.0."}
     },
     "required": ["type", "country_code", "passport_no", "name", "nationality",
                  "date_of_birth", "sex", "place_of_birth", "date_of_issue",
@@ -193,7 +208,7 @@ def image_to_bytes(img: Image.Image, format: str = "PNG") -> bytes:
     img.save(buffer, format=format) 
     return buffer.getvalue()
 
-def process_image(image_bytes: bytes, rotation_angle: int = 0, document_type: str = 'NRC') -> bytes:
+def process_image(image_bytes: bytes, document_type: str) -> bytes:
     """Applies auto-rotation, manual rotation, and conditional enhancement."""
     try:
         img = Image.open(io.BytesIO(image_bytes))
@@ -201,23 +216,18 @@ def process_image(image_bytes: bytes, rotation_angle: int = 0, document_type: st
         # 1. Auto-Rotate from EXIF data
         img = rotate_image_from_exif(img)
         
-        # 2. Apply Manual Rotation
-        if rotation_angle != 0:
-            img = img.rotate(rotation_angle, expand=True)
+        # Store the current display image bytes (after rotation)
+        st.session_state['current_image_bytes'] = image_to_bytes(img, format="JPEG") 
 
-        # Store the manually rotated image bytes for display (before enhancement)
-        st.session_state['current_image_bytes'] = image_to_bytes(img, format="JPEG") # Display in JPEG for smaller size
-
-        # 3. Conditional Enhancement (Only for NRC due to focus on handwriting)
+        # 2. Conditional Enhancement (Only for NRC due to focus on handwriting)
         if document_type == 'NRC':
-            # NRC Enhancement Pipeline (Sharpen 2.0x, Contrast 1.5x)
+            # st.info("Applying NRC-specific image enhancement: Sharpen (2.0x) and Contrast (1.5x)")
             img_gray = img.convert("L")
             sharpen_filter = ImageEnhance.Sharpness(img_gray)
             img_sharpened = sharpen_filter.enhance(2.0) 
             contrast_filter = ImageEnhance.Contrast(img_sharpened)
             img_final = contrast_filter.enhance(1.5) 
-            final_bytes = image_to_bytes(img_final, format="PNG") # Use PNG for quality retention
-            
+            final_bytes = image_to_bytes(img_final, format="PNG") 
         else:
             # DL/Passport: Use original color image but save as PNG for quality
             final_bytes = image_to_bytes(img, format="PNG")
@@ -235,14 +245,14 @@ def rotate_uploaded_image(angle: int):
         return
         
     try:
-        # Load the image from the latest bytes (which might already be rotated/processed)
+        # Load the image from the latest bytes
         img_bytes = st.session_state.get('current_image_bytes') or st.session_state['uploaded_file_bytes']
         img = Image.open(io.BytesIO(img_bytes))
         
         # Apply rotation
         img_rotated = img.rotate(angle, expand=True)
         
-        # Save the new bytes back to session state
+        # Save the new bytes back to session state for re-runs
         st.session_state['uploaded_file_bytes'] = image_to_bytes(img_rotated, format="JPEG")
         st.session_state['current_image_bytes'] = st.session_state['uploaded_file_bytes']
 
@@ -255,7 +265,7 @@ def rotate_uploaded_image(angle: int):
     except Exception as e:
         st.error(f"Error during manual rotation: {e}")
 
-# --- 3. NRC Specific Validation and Scoring ---
+# --- 3. NRC Specific Validation and Scoring (Functions remain the same) ---
 
 def is_valid_date(burmese_date_str: str) -> bool:
     """Basic plausibility check for the Date of Birth using Latin digits if found."""
@@ -347,7 +357,7 @@ def update_nrc_data_from_fields(fields_data: Dict[str, str]):
 
 # --- 4. Core AI Extraction Function ---
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, suppress_warnings=True)
 def extract_kyc_data(enhanced_image_bytes: bytes, document_type: str) -> Optional[Dict[str, Any]]:
     """Calls the Gemini API to extract structured data based on document type."""
     
@@ -365,11 +375,12 @@ def extract_kyc_data(enhanced_image_bytes: bytes, document_type: str) -> Optiona
         user_query = PP_EXTRACTION_PROMPT
         system_instruction = "You are an expert OCR system for extracting data from official documents, especially focusing on biographical data and Machine Readable Zones (MRZ)."
     else:
+        # Should not happen if UI is correctly gated
         st.error("Invalid document type selected.")
         return None
         
     base64_image = base64.b64encode(enhanced_image_bytes).decode('utf-8')
-    mime_type = "image/png" # Using PNG for consistent quality from the pre-processor
+    mime_type = "image/png" 
     
     payload = {
         "contents": [
@@ -385,7 +396,7 @@ def extract_kyc_data(enhanced_image_bytes: bytes, document_type: str) -> Optiona
         "generationConfig": {
             "responseMimeType": "application/json",
             "responseSchema": schema,
-            "temperature": 0.0 # Low temperature for deterministic data extraction
+            "temperature": 0.0 
         }
     }
 
@@ -404,6 +415,7 @@ def extract_kyc_data(enhanced_image_bytes: bytes, document_type: str) -> Optiona
         if json_string:
             extracted_data = json.loads(json_string)
             st.session_state['original_data'] = extracted_data.copy()
+            st.session_state['document_mode'] = document_type # Store the mode for correct rendering
             
             # Run specific post-processing/validation
             if document_type == 'NRC':
@@ -424,6 +436,8 @@ def extract_kyc_data(enhanced_image_bytes: bytes, document_type: str) -> Optiona
 
 def render_passport_results(data: Dict[str, Any]):
     """Renders passport results and runs MRZ checksum validation."""
+    
+    st.header("Results: Passport Data Extraction")
     
     passport_no_data = data.get('passport_no', '').replace('<', '')
     extracted_checksum = data.get('passport_no_checksum', '')
@@ -449,11 +463,13 @@ def render_passport_results(data: Dict[str, Any]):
         ("MRZ Full String", data.get("mrz_full_string", "N/A")),
         ("Extraction Confidence", f"{data.get('extraction_confidence', 0.0):.2f}"),
     ]
-    st.table(data_view)
+    st.table(pd.DataFrame(data_view, columns=['Field', 'Value']))
     
 
 def render_dl_results(data: Dict[str, Any]):
     """Renders Driving License results."""
+    
+    st.header("Results: Driving License Data Extraction")
     
     confidence = data.get('extraction_confidence', 0.0)
     st.metric(
@@ -487,12 +503,13 @@ def render_dl_results(data: Dict[str, Any]):
 def render_nrc_results(data: Dict[str, Any]):
     """Renders NRC results, validation, and the correction form (HITL)."""
     
+    st.header("Results: NRC Data Extraction")
+    
     warnings = data.get('validation_warnings', [])
     confidence = data.get('Overall_Confidence_Score')
     accuracy = st.session_state.get('accuracy_score', 1.0)
     
     # --- Performance Metrics Section ---
-    st.header("✨ NRC Performance Metrics")
     col_conf, col_acc = st.columns(2)
     
     with col_conf:
@@ -518,7 +535,7 @@ def render_nrc_results(data: Dict[str, Any]):
     
     st.markdown("---")
 
-    # 2. Final Data Display
+    # 2. Extracted Data Snapshot
     st.subheader("✅ 2. Extracted Data Snapshot")
     final_data_view = [
         ("NRC State/Division (X)", data.get("NRC_state_division", "N/A")),
@@ -529,7 +546,7 @@ def render_nrc_results(data: Dict[str, Any]):
         ("Father's Name (အဘအမည်)", data.get("Fathers_Name", "N/A")),
         ("Date of Birth (မွေးသက္ကရာဇ်)", data.get("Date_of_Birth", "N/A")),
     ]
-    st.table(final_data_view)
+    st.table(pd.DataFrame(final_data_view, columns=['Field', 'Value']))
     
     st.markdown("---")
 
@@ -575,63 +592,109 @@ def render_nrc_results(data: Dict[str, Any]):
             update_nrc_data_from_fields(fields_data)
             st.rerun()
 
-# --- 6. Main Application Flow ---
+# --- 6. Download Generation Functions ---
+
+def create_download_data():
+    """Prepares clean data for download and returns the necessary objects."""
+    download_data = st.session_state['extracted_data'].copy()
+    document_type = st.session_state['document_mode']
+    
+    # Remove transient Streamlit-specific keys
+    download_data.pop('validation_warnings', None)
+    
+    # Add NRC-specific accuracy score if applicable
+    if document_type == 'NRC':
+        download_data['OCR_Accuracy_Score'] = st.session_state.get('accuracy_score', 1.0)
+    
+    # 1. JSON
+    json_output = json.dumps(download_data, indent=2)
+    
+    # 2. Plain Text / Word (DOCX format)
+    text_output = f"--- {document_type.replace('_', ' ')} Extracted Data ---\n\n"
+    for key, value in download_data.items():
+        text_output += f"{key.replace('_', ' '):<30}: {value}\n"
+    text_output += f"\n--- End of Data ---\n"
+    
+    # 3. Excel (CSV format)
+    df = pd.DataFrame(download_data.items(), columns=['Field', 'Value'])
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
+    csv_output = csv_buffer.getvalue()
+    
+    return json_output, text_output, csv_output
+
+# --- 7. Main Application Flow ---
 
 def main():
     st.title("🛂 Unified KYC Document Extractor (AI IDP)")
     st.caption("Extract structured data from Myanmar NRC, Driving License, and Passports using the Gemini API.")
 
+    # Check for API Key early
+    if not API_KEY:
+        st.warning("Please configure your API key in Streamlit secrets to enable extraction.")
+    
     # --- Document Type Selector ---
-    document_type_options = ["NRC", "Driving_License", "Passport"]
+    document_type_options = ["--- Select Document Type ---", "NRC", "Driving_License", "Passport"]
+    
     selected_document_type = st.sidebar.selectbox(
         "Select Document Type for Scanning",
         document_type_options,
-        index=0,
+        key='current_document_selection', # Link selectbox to session state key
+        on_change=reset_session_state_for_new_mode, # Run reset function on change
         format_func=lambda x: x.replace('_', ' ')
     )
-
+    
+    is_mode_selected = selected_document_type != "--- Select Document Type ---"
+    
     st.sidebar.markdown("---")
-    st.sidebar.markdown(f"**Current Mode: {selected_document_type.replace('_', ' ')}**")
     
-    # --- File/Camera Input ---
-    tab1, tab2 = st.tabs(["🖼️ Upload Image", "📸 Take Photo"])
+    # --- Check for uploaded image to show content ---
+    if is_mode_selected:
+        
+        st.sidebar.markdown(f"**Current Mode: {selected_document_type.replace('_', ' ')}**")
+        
+        # --- File/Camera Input ---
+        st.subheader(f"0. Upload or Capture {selected_document_type.replace('_', ' ')}")
+        tab1, tab2 = st.tabs(["🖼️ Upload Image", "📸 Take Photo"])
 
-    uploaded_file = None
-    
-    with tab1:
-        uploaded_file_widget = st.file_uploader(f"Upload {selected_document_type.replace('_', ' ')} Image", type=["png", "jpg", "jpeg"])
-    with tab2:
-        camera_image_widget = st.camera_input(f"Take a Photo of {selected_document_type.replace('_', ' ')}")
+        uploaded_file = None
+        
+        with tab1:
+            uploaded_file_widget = st.file_uploader(f"Upload {selected_document_type.replace('_', ' ')} Image", type=["png", "jpg", "jpeg"])
+        with tab2:
+            camera_image_widget = st.camera_input(f"Take a Photo of {selected_document_type.replace('_', ' ')}")
 
-    if uploaded_file_widget:
-        uploaded_file = uploaded_file_widget
-    elif camera_image_widget:
-        uploaded_file = camera_image_widget
-    
-    
-    if uploaded_file:
-        file_name_or_default = getattr(uploaded_file, 'name', 'camera_image_file')
+        if uploaded_file_widget:
+            uploaded_file = uploaded_file_widget
+        elif camera_image_widget:
+            uploaded_file = camera_image_widget
+        
+        
+        if uploaded_file:
+            file_name_or_default = getattr(uploaded_file, 'name', 'camera_image_file')
 
-        # Only update session state bytes if a new file/photo is detected
-        if st.session_state.get('uploaded_file_name') != file_name_or_default or st.session_state.get('uploaded_file_bytes') is None:
-            st.session_state['uploaded_file_bytes'] = uploaded_file.getvalue()
-            st.session_state['uploaded_file_name'] = file_name_or_default
-            st.session_state['current_image_bytes'] = st.session_state['uploaded_file_bytes'] # Reset current image on new upload/capture
-            st.session_state['extracted_data'] = None
-            st.session_state['accuracy_score'] = None
-            st.session_state['enhanced_image_bytes'] = None
-            st.rerun()
+            # Only update session state bytes if a new file/photo is detected
+            # and only if the bytes themselves are different (to avoid unnecessary re-runs on simple refreshes)
+            if st.session_state.get('uploaded_file_name') != file_name_or_default: 
+                # Reset display image and clear old results when a new image is loaded
+                st.session_state['uploaded_file_bytes'] = uploaded_file.getvalue()
+                st.session_state['uploaded_file_name'] = file_name_or_default
+                st.session_state['current_image_bytes'] = st.session_state['uploaded_file_bytes']
+                st.session_state['extracted_data'] = None
+                st.session_state['accuracy_score'] = None
+                st.session_state['enhanced_image_bytes'] = None
+                st.rerun()
 
     
-    if st.session_state.get('uploaded_file_bytes'):
+    if st.session_state.get('uploaded_file_bytes') and is_mode_selected:
         image_bytes_to_display = st.session_state['current_image_bytes']
         
         # --- Rotation Controls ---
-        st.subheader("0. Correct Orientation (If needed)")
+        st.subheader("1. Correct Orientation (If needed)")
         col_rot1, col_rot2, col_rot3, col_rot4 = st.columns([1, 1, 1, 3])
-        with col_rot1: st.button("Rotate ↺ -90°", on_click=rotate_uploaded_image, args=(90,), help="Rotate Counter-Clockwise 90°")
-        with col_rot2: st.button("Rotate ↻ +90°", on_click=rotate_uploaded_image, args=(-90,), help="Rotate Clockwise 90°")
-        with col_rot3: st.button("Rotate 180°", on_click=rotate_uploaded_image, args=(180,), help="Rotate 180°")
+        with col_rot1: st.button("Rotate ↺ -90°", on_click=rotate_uploaded_image, args=(90,), key='rot_neg90', help="Rotate Counter-Clockwise 90°")
+        with col_rot2: st.button("Rotate ↻ +90°", on_click=rotate_uploaded_image, args=(-90,), key='rot_pos90', help="Rotate Clockwise 90°")
+        with col_rot3: st.button("Rotate 180°", on_click=rotate_uploaded_image, args=(180,), key='rot_180', help="Rotate 180°")
         with col_rot4: st.info("The image below shows the *current* orientation (after auto-EXIF correction).")
 
         # --- Image Display Tabs ---
@@ -649,60 +712,100 @@ def main():
         st.divider()
 
         # Button to trigger extraction
-        if st.button(f"1. Extract & Validate {selected_document_type.replace('_', ' ')} Data", type="primary"):
+        if st.button(f"2. Extract & Validate {selected_document_type.replace('_', ' ')} Data", type="primary"):
             
+            if not API_KEY:
+                st.error("Cannot proceed: API Key is not configured.")
+                return
+
             st.session_state['extracted_data'] = None 
             st.session_state['accuracy_score'] = 1.0
             
             with st.spinner(f"Processing image and calling Gemini for {selected_document_type.replace('_', ' ')}..."):
-                # 2. Run the image through the pipeline for enhancement and orientation
-                # Pass document_type to conditionally run NRC specific enhancement
-                enhanced_bytes = process_image(st.session_state['uploaded_file_bytes'], document_type=selected_document_type)
+                # 3. Run the image through the pipeline for enhancement and orientation
+                enhanced_bytes = process_image(st.session_state['uploaded_file_bytes'], selected_document_type)
                 st.session_state['enhanced_image_bytes'] = enhanced_bytes
                 
-                # 3. Perform the extraction
+                # 4. Perform the extraction
                 extracted_data = extract_kyc_data(enhanced_bytes, selected_document_type)
             
             if extracted_data:
                 st.session_state['extracted_data'] = extracted_data
                 st.rerun() 
                 
-        # --- Display Results, Validation, and Correction ---
-        if st.session_state['extracted_data'] is not None:
-            st.header("Results and Validation")
-            
-            if selected_document_type == 'NRC':
-                render_nrc_results(st.session_state['extracted_data'])
-            elif selected_document_type == 'Driving_License':
-                render_dl_results(st.session_state['extracted_data'])
-            elif selected_document_type == 'Passport':
-                render_passport_results(st.session_state['extracted_data'])
+        st.divider()
 
-            # --- Download Logic ---
-            st.subheader("💾 Download Final JSON")
-            
-            # Prepare data for download
-            download_data = st.session_state['extracted_data'].copy()
-            if 'validation_warnings' in download_data:
-                download_data.pop('validation_warnings', None)
-            
-            if selected_document_type == 'NRC':
-                download_data['OCR_Accuracy_Score'] = st.session_state.get('accuracy_score', 1.0)
-            
-            json_output = json.dumps(download_data, indent=2)
+    # --- Conditional Results Display ---
+    # This section only renders if data is extracted AND the mode matches the current selection
+    
+    if st.session_state['extracted_data'] is not None and st.session_state['document_mode'] == selected_document_type:
+        
+        st.header("Extracted Data Results")
+        
+        if selected_document_type == 'NRC':
+            render_nrc_results(st.session_state['extracted_data'])
+        elif selected_document_type == 'Driving_License':
+            render_dl_results(st.session_state['extracted_data'])
+        elif selected_document_type == 'Passport':
+            render_passport_results(st.session_state['extracted_data'])
 
+        # --- Download Logic ---
+        st.subheader("💾 Download Extracted Data")
+        
+        json_output, text_output, csv_output = create_download_data()
+        
+        col_dl1, col_dl2, col_dl3, col_dl4 = st.columns(4)
+
+        with col_dl1:
             st.download_button(
-                label=f"⬇️ Download {selected_document_type.replace('_', ' ')} Data (JSON)",
+                label=f"⬇️ JSON",
                 data=json_output,
                 file_name=f"{selected_document_type.lower()}_data.json",
                 mime="application/json",
+                key='dl_json',
+                type='secondary'
+            )
+        with col_dl2:
+            st.download_button(
+                label=f"⬇️ Plain Text",
+                data=text_output,
+                file_name=f"{selected_document_type.lower()}_data.txt",
+                mime="text/plain",
+                key='dl_text',
+                type='secondary'
+            )
+        with col_dl3:
+            # Labeled as Word/DOCX for user experience, content is easy-to-read text
+            st.download_button(
+                label=f"⬇️ Word/DOCX",
+                data=text_output,
+                file_name=f"{selected_document_type.lower()}_report.doc", 
+                mime="application/msword",
+                key='dl_word',
+                type='secondary'
+            )
+        with col_dl4:
+            st.download_button(
+                label=f"⬇️ Excel (CSV)",
+                data=csv_output,
+                file_name=f"{selected_document_type.lower()}_data.csv",
+                mime="text/csv",
+                key='dl_csv',
+                type='secondary'
             )
             
         st.markdown("---")
+    
+    elif not is_mode_selected:
+         st.info("Please select a KYC document type from the sidebar to begin.")
 
     else:
-        st.info("Please select a document type, upload an image file or take a photo, and click '1. Extract & Validate Data' to begin.")
-
+        # State when mode is selected but no data is uploaded/extracted yet
+        if not st.session_state.get('uploaded_file_bytes'):
+            st.info(f"Ready for scan. Use the tabs above to upload or capture a {selected_document_type.replace('_', ' ')} image.")
+        # If an image is uploaded but extraction hasn't been run
+        elif not st.session_state.get('extracted_data'):
+             st.info(f"Image uploaded. Click '2. Extract & Validate {selected_document_type.replace('_', ' ')} Data' to proceed.")
 
 if __name__ == "__main__":
     main()
