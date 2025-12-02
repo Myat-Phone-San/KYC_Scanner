@@ -15,7 +15,7 @@ from PIL import Image, ImageEnhance, ExifTags
 
 # Set Streamlit page configuration before any other function is called
 st.set_page_config(
-    page_title="🛂 Unified KYC Document Extractor (AI IDP)",
+    page_title="🛂 Unified KYC Document Extractor",
     layout="wide"
 )
 
@@ -1171,8 +1171,8 @@ def create_download_data():
 # --- 7. Main Application Flow ---
 
 def main():
-    st.title("🛂 Unified KYC Document Extractor (AI IDP)")
-    st.caption("Extract structured data from Myanmar NRC, Driving License, and Passports using the Gemini API.")
+    st.title("🛂 Unified KYC Document Extractor")
+    st.caption("Extract structured data from Myanmar NRC, Driving License, and Passports.")
 
     # Check for API Key early
     if not API_KEY:
