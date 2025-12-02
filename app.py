@@ -115,7 +115,7 @@ DL_EXTRACTION_SCHEMA = {
 
 DL_EXTRACTION_PROMPT = """
 Analyze the provided image, which is a Myanmar Driving License.
-Extract ALL data fields, including both the Latin script (English) and Myanmar script (Burmese) values, and return the result strictly as a JSON object matching the provided schema.
+Extract ALL data fields, including both the script (English) and Myanmar script (Burmese) values, and return the result strictly as a JSON object matching the provided schema.
 
 CRITICAL INSTRUCTION FOR NRC:
 1. 'nrc_no': Extract the NRC number **EXACTLY** as it appears on the card (e.g., '9/MAHTALA(N)326458').
@@ -478,11 +478,11 @@ def render_dl_results(data: Dict[str, Any]):
     col_en, col_my = st.columns(2)
     
     with col_en:
-        st.subheader("Latin Script (English) Fields")
+        st.subheader("English Fields")
         st.table([
             ("License No", data.get("license_no", "N/A")),
             ("Name", data.get("name", "N/A")),
-            ("NRC No (Latin)", data.get("nrc_no", "N/A")),
+            ("NRC No", data.get("nrc_no", "N/A")),
             ("Date of Birth", data.get("date_of_birth", "N/A")),
             ("Valid Up", data.get("valid_up", "N/A")),
         ])
@@ -718,7 +718,7 @@ def render_dl_results(data: Dict[str, Any]):
         st.table([
             ("License No", data.get("license_no", "N/A")),
             ("Name", data.get("name", "N/A")),
-            ("NRC No (Latin)", data.get("nrc_no", "N/A")),
+            ("NRC No", data.get("nrc_no", "N/A")),
             ("Date of Birth", data.get("date_of_birth", "N/A")),
             ("Valid Up", data.get("valid_up", "N/A")),
         ])
@@ -950,11 +950,11 @@ def render_dl_results(data: Dict[str, Any]):
     col_en, col_my = st.columns(2)
     
     with col_en:
-        st.subheader("Latin Script (English) Fields")
+        st.subheader("English Fields")
         st.table([
             ("License No", data.get("license_no", "N/A")),
             ("Name", data.get("name", "N/A")),
-            ("NRC No (Latin)", data.get("nrc_no", "N/A")),
+            ("NRC No", data.get("nrc_no", "N/A")),
             ("Date of Birth", data.get("date_of_birth", "N/A")),
             ("Valid Up", data.get("valid_up", "N/A")),
         ])
