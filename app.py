@@ -21,7 +21,7 @@ st.set_page_config(
 
 # --- API Configuration ---
 try:
-    # 💥 CRITICAL: Use st.secrets for secure API key loading
+    # CRITICAL: Use st.secrets for secure API key loading
     API_KEY = st.secrets["GEMINI_API_KEY"]
 except KeyError:
     # Fallback: Check environment variables for local testing
@@ -32,7 +32,6 @@ API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-f
     
 # --- Session State Initialization ---
 # Initialize session state for all shared data across document types
-# The 'document_mode' tracks which document type the current 'extracted_data' belongs to
 if 'document_mode' not in st.session_state: st.session_state['document_mode'] = None
 if 'extracted_data' not in st.session_state: st.session_state['extracted_data'] = None
 if 'original_data' not in st.session_state: st.session_state['original_data'] = None
@@ -58,8 +57,6 @@ def reset_session_state_for_new_mode():
 
 
 # --- 1. Schemas and Prompts (Unified) ---
-# (Schemas and Prompts remain the same for brevity, as they were correct in the previous version)
-
 # --- NRC Schema and Prompt ---
 NRC_JSON_SCHEMA = {
     "type": "OBJECT",
@@ -357,7 +354,7 @@ def update_nrc_data_from_fields(fields_data: Dict[str, str]):
 
 # --- 4. Core AI Extraction Function ---
 
-@st.cache_data(show_spinner=False, suppress_warnings=True)
+# Removed @st.cache_data to fix TypeError
 def extract_kyc_data(enhanced_image_bytes: bytes, document_type: str) -> Optional[Dict[str, Any]]:
     """Calls the Gemini API to extract structured data based on document type."""
     
@@ -674,14 +671,13 @@ def main():
             file_name_or_default = getattr(uploaded_file, 'name', 'camera_image_file')
 
             # Only update session state bytes if a new file/photo is detected
-            # and only if the bytes themselves are different (to avoid unnecessary re-runs on simple refreshes)
             if st.session_state.get('uploaded_file_name') != file_name_or_default: 
                 # Reset display image and clear old results when a new image is loaded
                 st.session_state['uploaded_file_bytes'] = uploaded_file.getvalue()
                 st.session_state['uploaded_file_name'] = file_name_or_default
                 st.session_state['current_image_bytes'] = st.session_state['uploaded_file_bytes']
                 st.session_state['extracted_data'] = None
-                st.session_state['accuracy_score'] = None
+                st.session_state['accuracy_score'] = 1.0
                 st.session_state['enhanced_image_bytes'] = None
                 st.rerun()
 
