@@ -19,13 +19,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Define the set of available document modes
-DOCUMENT_MODES = {
-    'Driving_License': 'Myanmar Driving License',
-    'NRC': 'Myanmar National Registration Card (NRC)',
-    'Passport': 'Myanmar Passport'
-}
-
 # --- API Configuration ---
 try:
     # CRITICAL: Use st.secrets for secure API key loading
@@ -38,8 +31,8 @@ except KeyError:
 API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={API_KEY}"
     
 # --- Session State Initialization ---
-# Initialize session state. Set Driving License as the default mode.
-if 'document_mode' not in st.session_state: st.session_state['document_mode'] = 'Driving_License'
+# Initialize session state for all shared data across document types
+if 'document_mode' not in st.session_state: st.session_state['document_mode'] = None
 if 'extracted_data' not in st.session_state: st.session_state['extracted_data'] = None
 if 'original_data' not in st.session_state: st.session_state['original_data'] = None
 if 'accuracy_score' not in st.session_state: st.session_state['accuracy_score'] = None
@@ -47,24 +40,20 @@ if 'enhanced_image_bytes' not in st.session_state: st.session_state['enhanced_im
 if 'uploaded_file_bytes' not in st.session_state: st.session_state['uploaded_file_bytes'] = None
 if 'current_image_bytes' not in st.session_state: st.session_state['current_image_bytes'] = None
 if 'uploaded_file_name' not in st.session_state: st.session_state['uploaded_file_name'] = None
-if 'current_document_selection' not in st.session_state: st.session_state['current_document_selection'] = 'Driving_License' # Default selected mode
+if 'current_document_selection' not in st.session_state: st.session_state['current_document_selection'] = 'None'
 
 
 def reset_session_state_for_new_mode():
     """Clears all previous extraction data when the document mode is switched."""
-    # Only reset if the actual mode has changed
-    if st.session_state['document_mode'] != st.session_state['current_document_selection']:
-        st.session_state['extracted_data'] = None
-        st.session_state['original_data'] = None
-        st.session_state['accuracy_score'] = None
-        st.session_state['enhanced_image_bytes'] = None
-        st.session_state['uploaded_file_bytes'] = None
-        st.session_state['current_image_bytes'] = None
-        st.session_state['uploaded_file_name'] = None
-        # Update the document mode tracker
-        st.session_state['document_mode'] = st.session_state['current_document_selection']
-        # Force rerun to reflect state change immediately
-        st.rerun()
+    st.session_state['extracted_data'] = None
+    st.session_state['original_data'] = None
+    st.session_state['accuracy_score'] = None
+    st.session_state['enhanced_image_bytes'] = None
+    st.session_state['uploaded_file_bytes'] = None
+    st.session_state['current_image_bytes'] = None
+    st.session_state['uploaded_file_name'] = None
+    # Update the document mode tracker
+    st.session_state['document_mode'] = st.session_state['current_document_selection']
 
 
 # --- 1. Schemas and Prompts (Unified) ---
@@ -121,7 +110,7 @@ DL_EXTRACTION_SCHEMA = {
         "extraction_confidence": {"type": "number", "description": "The model's self-assessed confidence score for the entire extraction, from 0.0 (low) to 1.0 (high)."}
     },
     "required": ["license_no", "name", "nrc_no", "date_of_birth", "blood_type", "valid_up",
-                  "name_myanmar", "nrc_no_myanmar", "date_of_birth_myanmar", "valid_up_myanmar", "extraction_confidence"]
+                 "name_myanmar", "nrc_no_myanmar", "date_of_birth_myanmar", "valid_up_myanmar", "extraction_confidence"]
 }
 
 DL_EXTRACTION_PROMPT = """
@@ -157,9 +146,9 @@ PP_EXTRACTION_SCHEMA = {
         "extraction_confidence": {"type": "number", "description": "The model's self-assessed confidence score for the entire extraction, from 0.0 to 1.0."}
     },
     "required": ["type", "country_code", "passport_no", "name", "nationality",
-                  "date_of_birth", "sex", "place_of_birth", "date_of_issue",
-                  "date_of_expiry", "authority", "mrz_full_string",
-                  "passport_no_checksum", "extraction_confidence"]
+                 "date_of_birth", "sex", "place_of_birth", "date_of_issue",
+                 "date_of_expiry", "authority", "mrz_full_string",
+                 "passport_no_checksum", "extraction_confidence"]
 }
 
 PP_EXTRACTION_PROMPT = """
@@ -213,9 +202,7 @@ def rotate_image_from_exif(img: Image.Image) -> Image.Image:
 def image_to_bytes(img: Image.Image, format: str = "PNG") -> bytes:
     """Converts a PIL Image object back to bytes."""
     buffer = io.BytesIO()
-    # Use JPEG for display bytes to reduce memory, PNG for enhancement quality
-    save_format = format if format == "PNG" else "JPEG" 
-    img.save(buffer, format=save_format) 
+    img.save(buffer, format=format) 
     return buffer.getvalue()
 
 def process_image(image_bytes: bytes, document_type: str) -> bytes:
@@ -231,16 +218,15 @@ def process_image(image_bytes: bytes, document_type: str) -> bytes:
 
         # 2. Conditional Enhancement (Only for NRC due to focus on handwriting)
         if document_type == 'NRC':
-            # Convert to grayscale for better contrast/sharpness focusing on text
+            # st.info("Applying NRC-specific image enhancement: Sharpen (2.0x) and Contrast (1.5x)")
             img_gray = img.convert("L")
             sharpen_filter = ImageEnhance.Sharpness(img_gray)
             img_sharpened = sharpen_filter.enhance(2.0) 
             contrast_filter = ImageEnhance.Contrast(img_sharpened)
             img_final = contrast_filter.enhance(1.5) 
-            # Use PNG for the AI input for maximum quality transmission
             final_bytes = image_to_bytes(img_final, format="PNG") 
         else:
-            # DL/Passport: Use original color image but save as PNG for AI input
+            # DL/Passport: Use original color image but save as PNG for quality
             final_bytes = image_to_bytes(img, format="PNG")
             
         return final_bytes
@@ -256,14 +242,14 @@ def rotate_uploaded_image(angle: int):
         return
         
     try:
-        # Load the image from the latest display bytes
+        # Load the image from the latest bytes
         img_bytes = st.session_state.get('current_image_bytes') or st.session_state['uploaded_file_bytes']
         img = Image.open(io.BytesIO(img_bytes))
         
         # Apply rotation
         img_rotated = img.rotate(angle, expand=True)
         
-        # Save the new bytes back to session state
+        # Save the new bytes back to session state for re-runs
         st.session_state['uploaded_file_bytes'] = image_to_bytes(img_rotated, format="JPEG")
         st.session_state['current_image_bytes'] = st.session_state['uploaded_file_bytes']
 
@@ -282,7 +268,6 @@ def is_valid_date(burmese_date_str: str) -> bool:
     """Basic plausibility check for the Date of Birth using Latin digits if found."""
     today = date.today()
     import re
-    # Try to find a 4-digit year (even within Burmese text)
     year_match = re.search(r'(\d{4})', burmese_date_str)
     if year_match:
         try:
@@ -292,7 +277,6 @@ def is_valid_date(burmese_date_str: str) -> bool:
             return True
         except ValueError:
             return False
-    # If no Latin year is found, we assume it's correctly written in Burmese script
     return True 
 
 def validate_nrc_data(data: Dict[str, Any]) -> List[str]:
@@ -317,7 +301,6 @@ def validate_nrc_data(data: Dict[str, Any]) -> List[str]:
     
     # 3. Validate NRC Status (sth)
     nrc_sth = str(data.get('NRC_sth', '')).strip()
-    # Check if it looks like (A), (C), or (N) including parentheses
     if nrc_sth and not (nrc_sth.startswith('(') and nrc_sth.endswith(')') and len(nrc_sth) >= 3):
         warnings.append(f"NRC Classification Code ('NRC_sth') '{nrc_sth}' should be formatted as (C), (N), or (A) and include parentheses.")
     
@@ -344,7 +327,7 @@ def calculate_accuracy_score(original_data: Dict[str, Any], corrected_data: Dict
             similarity_ratio = difflib.SequenceMatcher(None, original_value, corrected_value).ratio()
             total_score += similarity_ratio
         else:
-            total_score += 1.0 # Perfect match if both are empty/missing
+            total_score += 1.0 
             
     accuracy = total_score / len(fields_to_compare)
     return accuracy
@@ -353,8 +336,8 @@ def update_nrc_data_from_fields(fields_data: Dict[str, str]):
     """Updates session state with human-corrected NRC data."""
     updated_data = st.session_state['extracted_data'].copy() 
     for key, value in fields_data.items():
-        # Update field values
-        if key in updated_data:
+        # Ensure 'Overall_Confidence_Score' is not overwritten by text input
+        if key not in ['Overall_Confidence_Score_input']: 
              updated_data[key] = value
 
     st.session_state['extracted_data'] = updated_data
@@ -388,11 +371,12 @@ def extract_kyc_data(enhanced_image_bytes: bytes, document_type: str) -> Optiona
         user_query = PP_EXTRACTION_PROMPT
         system_instruction = "You are an expert OCR system for extracting data from official documents, especially focusing on biographical data and Machine Readable Zones (MRZ)."
     else:
+        # Should not happen if UI is correctly gated
         st.error("Invalid document type selected.")
         return None
         
     base64_image = base64.b64encode(enhanced_image_bytes).decode('utf-8')
-    mime_type = "image/png" # Use PNG for the AI input for quality
+    mime_type = "image/png" 
     
     payload = {
         "contents": [
@@ -408,33 +392,18 @@ def extract_kyc_data(enhanced_image_bytes: bytes, document_type: str) -> Optiona
         "generationConfig": {
             "responseMimeType": "application/json",
             "responseSchema": schema,
-            "temperature": 0.0 # Use 0.0 for deterministic extraction
+            "temperature": 0.0 
         }
     }
 
-    extraction_bar = st.progress(0, text="Sending image to Gemini for extraction...")
-    
     try:
-        # Mimic exponential backoff manually for a single retry attempt
-        for attempt in range(2):
-            try:
-                response = requests.post(
-                    API_URL, 
-                    params={'key': API_KEY},
-                    headers={'Content-Type': 'application/json'}, 
-                    json=payload
-                )
-                response.raise_for_status()
-                extraction_bar.progress(100, text="Extraction complete!")
-                time.sleep(0.5)
-                break
-            except requests.exceptions.RequestException as e:
-                if attempt == 0 and response.status_code in [429, 503]:
-                    time.sleep(2 ** (attempt + 1)) # Exponential backoff
-                    extraction_bar.progress(50, text="API throttled, retrying...")
-                    continue
-                raise e # Re-raise if not a retryable error or last attempt
-
+        response = requests.post(
+            API_URL, 
+            params={'key': API_KEY},
+            headers={'Content-Type': 'application/json'}, 
+            json=payload
+        )
+        response.raise_for_status()
         result = response.json()
         
         json_string = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text')
@@ -442,7 +411,7 @@ def extract_kyc_data(enhanced_image_bytes: bytes, document_type: str) -> Optiona
         if json_string:
             extracted_data = json.loads(json_string)
             st.session_state['original_data'] = extracted_data.copy()
-            st.session_state['document_mode'] = document_type
+            st.session_state['document_mode'] = document_type # Store the mode for correct rendering
             
             # Run specific post-processing/validation
             if document_type == 'NRC':
@@ -458,8 +427,6 @@ def extract_kyc_data(enhanced_image_bytes: bytes, document_type: str) -> Optiona
     except Exception as e:
         st.error(f"An unexpected error occurred during API call: {e}")
         return None
-    finally:
-        extraction_bar.empty()
 
 # --- 5. UI Rendering Functions ---
 
@@ -484,23 +451,13 @@ def render_passport_results(data: Dict[str, Any]):
 
     # Display in a simple table/list
     data_view = [
-        ("Extraction Confidence", f"{data.get('extraction_confidence', 0.0):.2f}"),
-        ("--- BIOGRAPHICAL DATA ---", ""),
         ("Passport Type", data.get("type", "N/A")),
-        ("Country Code", data.get("country_code", "N/A")),
         ("Passport No", data.get("passport_no", "N/A")),
         ("Name", data.get("name", "N/A")),
-        ("Nationality", data.get("nationality", "N/A")),
         ("Date of Birth", data.get("date_of_birth", "N/A")),
-        ("Sex", data.get("sex", "N/A")),
-        ("Place of Birth", data.get("place_of_birth", "N/A")),
-        ("Date of Issue", data.get("date_of_issue", "N/A")),
         ("Date of Expiry", data.get("date_of_expiry", "N/A")),
-        ("Authority", data.get("authority", "N/A")),
-        ("--- MRZ DATA ---", ""),
         ("MRZ Full String", data.get("mrz_full_string", "N/A")),
-        ("Passport No Checksum", extracted_checksum),
-        ("Calculated Checksum", calculated_checksum),
+        ("Extraction Confidence", f"{data.get('extraction_confidence', 0.0):.2f}"),
     ]
     st.table(pd.DataFrame(data_view, columns=['Field', 'Value']))
     
@@ -591,7 +548,7 @@ def render_nrc_results(data: Dict[str, Any]):
 
     # 3. Human-in-the-Loop Correction (Text Fields)
     st.subheader("✍️ 3. Correct Data & Recalculate Accuracy (HITL)")
-    st.markdown("Review and correct any errors below to train the accuracy score. Note: NRC_township, Name, Father's Name, and Date of Birth require **Burmese script**.")
+    st.markdown("Review and correct any errors below to train the accuracy score.")
     
     with st.form("nrc_correction_form"):
         current_data = st.session_state['extracted_data']
@@ -600,20 +557,20 @@ def render_nrc_results(data: Dict[str, Any]):
         st.markdown("##### NRC Components (X/XXX(Y)######)")
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            NRC_state_division = st.text_input("State/Division Code (X)", value=current_data.get('NRC_state_division', ''), help="Latin Digits (1-14)")
+            NRC_state_division = st.text_input("State/Division Code (X)", value=current_data.get('NRC_state_division', ''))
         with col2:
-            NRC_township = st.text_input("Township Code (XXX)", value=current_data.get('NRC_township', ''), help="Burmese Script Only")
+            NRC_township = st.text_input("Township Code (XXX)", value=current_data.get('NRC_township', ''))
         with col3:
-            NRC_sth = st.text_input("Classification Code ((Y))", value=current_data.get('NRC_sth', ''), help="(N), (C), or (A) including parentheses")
+            NRC_sth = st.text_input("Classification Code ((Y))", value=current_data.get('NRC_sth', ''))
         with col4:
-            NRC_no = st.text_input("6-Digit Number (######)", value=current_data.get('NRC_no', ''), help="Latin Digits Only")
+            NRC_no = st.text_input("6-Digit Number (######)", value=current_data.get('NRC_no', ''))
 
         st.markdown("---")
 
         # --- Personal Details (Burmese Script) ---
-        Name = st.text_input("Name (အမည်)", value=current_data.get('Name', ''), help="Burmese Script Only")
-        Fathers_Name = st.text_input("Father's Name (အဘအမည်)", value=current_data.get('Fathers_Name', ''), help="Burmese Script Only")
-        Date_of_Birth = st.text_input("Date of Birth (မွေးသက္ကရာဇ်)", value=current_data.get('Date_of_Birth', ''), help="Burmese Script Only")
+        Name = st.text_input("Name (အမည်)", value=current_data.get('Name', ''))
+        Fathers_Name = st.text_input("Father's Name (အဘအမည်)", value=current_data.get('Fathers_Name', ''))
+        Date_of_Birth = st.text_input("Date of Birth (မွေးသက္ကရာဇ်)", value=current_data.get('Date_of_Birth', ''))
 
         # Button to submit corrections
         submitted = st.form_submit_button("Update and Re-Validate Extracted Data", type="secondary")
@@ -631,106 +588,768 @@ def render_nrc_results(data: Dict[str, Any]):
             update_nrc_data_from_fields(fields_data)
             st.rerun()
 
-# --- 6. Main Streamlit Application Logic ---
+# --- 4. Core AI Extraction Function ---
 
-def main_app():
+def extract_kyc_data(enhanced_image_bytes: bytes, document_type: str) -> Optional[Dict[str, Any]]:
+    """Calls the Gemini API to extract structured data based on document type."""
+    
+    # Select specific configuration
+    if document_type == 'NRC':
+        schema = NRC_JSON_SCHEMA
+        user_query = NRC_USER_QUERY
+        system_instruction = NRC_SYSTEM_INSTRUCTION
+    elif document_type == 'Driving_License':
+        schema = DL_EXTRACTION_SCHEMA
+        user_query = DL_EXTRACTION_PROMPT
+        system_instruction = "You are an expert OCR system for extracting data from official documents. Follow all instructions precisely."
+    elif document_type == 'Passport':
+        schema = PP_EXTRACTION_SCHEMA
+        user_query = PP_EXTRACTION_PROMPT
+        system_instruction = "You are an expert OCR system for extracting data from official documents, especially focusing on biographical data and Machine Readable Zones (MRZ)."
+    else:
+        # Should not happen if UI is correctly gated
+        st.error("Invalid document type selected.")
+        return None
+        
+    base64_image = base64.b64encode(enhanced_image_bytes).decode('utf-8')
+    mime_type = "image/png" 
+    
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {"text": user_query},
+                    {"inlineData": {"mimeType": mime_type, "data": base64_image}}
+                ]
+            }
+        ],
+        "systemInstruction": {"parts": [{"text": system_instruction}]},
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": schema,
+            "temperature": 0.0 
+        }
+    }
+
+    try:
+        response = requests.post(
+            API_URL, 
+            params={'key': API_KEY},
+            headers={'Content-Type': 'application/json'}, 
+            json=payload
+        )
+        response.raise_for_status()
+        result = response.json()
+        
+        json_string = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text')
+        
+        if json_string:
+            extracted_data = json.loads(json_string)
+            st.session_state['original_data'] = extracted_data.copy()
+            st.session_state['document_mode'] = document_type # Store the mode for correct rendering
+            
+            # Run specific post-processing/validation
+            if document_type == 'NRC':
+                warnings = validate_nrc_data(extracted_data)
+                extracted_data['validation_warnings'] = warnings
+            
+            return extracted_data
+        else:
+            error_detail = result.get('candidates', [{}])[0].get('finishReason', 'No content generated.')
+            st.error(f"Error: Could not extract structured JSON. Finish Reason: {error_detail}")
+            return None
+
+    except Exception as e:
+        st.error(f"An unexpected error occurred during API call: {e}")
+        return None
+
+# --- 5. UI Rendering Functions ---
+
+def render_passport_results(data: Dict[str, Any]):
+    """Renders passport results and runs MRZ checksum validation."""
+    
+    st.header("Results: Passport Data Extraction")
+    
+    passport_no_data = data.get('passport_no', '').replace('<', '')
+    extracted_checksum = data.get('passport_no_checksum', '')
+    calculated_checksum = calculate_mrz_checksum(passport_no_data)
+    
+    checksum_verified = (calculated_checksum == extracted_checksum) and (extracted_checksum != "")
+    verification_status = "✅ VERIFIED (Checksum Matched)" if checksum_verified else "⚠️ WARNING: CHECKSUM MISMATCH"
+    
+    st.subheader("Verification Status")
+    if checksum_verified:
+        st.success(verification_status)
+    else:
+        st.warning(verification_status)
+        st.error(f"Extracted Checksum: **{extracted_checksum}** | Calculated Checksum: **{calculated_checksum}**")
+
+    # Display in a simple table/list
+    data_view = [
+        ("Passport Type", data.get("type", "N/A")),
+        ("Passport No", data.get("passport_no", "N/A")),
+        ("Name", data.get("name", "N/A")),
+        ("Date of Birth", data.get("date_of_birth", "N/A")),
+        ("Date of Expiry", data.get("date_of_expiry", "N/A")),
+        ("MRZ Full String", data.get("mrz_full_string", "N/A")),
+        ("Extraction Confidence", f"{data.get('extraction_confidence', 0.0):.2f}"),
+    ]
+    st.table(pd.DataFrame(data_view, columns=['Field', 'Value']))
+    
+
+def render_dl_results(data: Dict[str, Any]):
+    """Renders Driving License results."""
+    
+    st.header("Results: Driving License Data Extraction")
+    
+    confidence = data.get('extraction_confidence', 0.0)
+    st.metric(
+        label="Model Confidence",
+        value=f"{confidence * 100:.0f}%",
+        delta="AI's certainty of its initial output."
+    )
+    
+    # Display in a two-column format for English and Myanmar scripts
+    col_en, col_my = st.columns(2)
+    
+    with col_en:
+        st.subheader("Latin Script (English) Fields")
+        st.table([
+            ("License No", data.get("license_no", "N/A")),
+            ("Name", data.get("name", "N/A")),
+            ("NRC No (Latin)", data.get("nrc_no", "N/A")),
+            ("Date of Birth", data.get("date_of_birth", "N/A")),
+            ("Valid Up", data.get("valid_up", "N/A")),
+        ])
+    with col_my:
+        st.subheader("Myanmar Script (Burmese) Fields")
+        st.table([
+            ("အမည် (Name)", data.get("name_myanmar", "N/A")),
+            ("မှတ်ပုံတင် (NRC)", data.get("nrc_no_myanmar", "N/A")),
+            ("မွေးသက္ကရာဇ် (DOB)", data.get("date_of_birth_myanmar", "N/A")),
+            ("ကုန်ဆုံးရက် (Expiry)", data.get("valid_up_myanmar", "N/A")),
+            ("Blood Type", data.get("blood_type", "N/A")),
+        ])
+
+def render_nrc_results(data: Dict[str, Any]):
+    """Renders NRC results, validation, and the correction form (HITL)."""
+    
+    st.header("Results: NRC Data Extraction")
+    
+    warnings = data.get('validation_warnings', [])
+    confidence = data.get('Overall_Confidence_Score')
+    accuracy = st.session_state.get('accuracy_score', 1.0)
+    
+    # --- Performance Metrics Section ---
+    col_conf, col_acc = st.columns(2)
+    
+    with col_conf:
+        st.metric(
+            label="Model Confidence",
+            value=f"{confidence * 100:.0f}%" if confidence is not None else "N/A"
+        )
+    with col_acc:
+        st.metric(
+            label="OCR Field Accuracy",
+            value=f"{accuracy * 100:.2f}%",
+            delta="Similarity to the human-corrected output."
+        )
+
+    # 1. Validation Warnings
+    st.subheader("⚠️ 1. Validation Warnings")
+    if warnings:
+        st.warning("The extracted data has the following potential errors:")
+        for warning in warnings:
+            st.markdown(f"- **{warning}**")
+    else:
+        st.success("Data passed all preliminary validation checks.")
+    
+    st.markdown("---")
+
+    # 2. Extracted Data Snapshot
+    st.subheader("✅ 2. Extracted Data Snapshot")
+    final_data_view = [
+        ("NRC State/Division (X)", data.get("NRC_state_division", "N/A")),
+        ("NRC Township (XXX)", data.get("NRC_township", "N/A")),
+        ("NRC Classification ((Y))", data.get("NRC_sth", "N/A")),
+        ("NRC 6-Digit No (######)", data.get("NRC_no", "N/A")),
+        ("Name (အမည်)", data.get("Name", "N/A")),
+        ("Father's Name (အဘအမည်)", data.get("Fathers_Name", "N/A")),
+        ("Date of Birth (မွေးသက္ကရာဇ်)", data.get("Date_of_Birth", "N/A")),
+    ]
+    st.table(pd.DataFrame(final_data_view, columns=['Field', 'Value']))
+    
+    st.markdown("---")
+
+    # 3. Human-in-the-Loop Correction (Text Fields)
+    st.subheader("✍️ 3. Correct Data & Recalculate Accuracy (HITL)")
+    st.markdown("Review and correct any errors below to train the accuracy score.")
+    
+    with st.form("nrc_correction_form"):
+        current_data = st.session_state['extracted_data']
+        
+        # --- Granular NRC Fields ---
+        st.markdown("##### NRC Components (X/XXX(Y)######)")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            NRC_state_division = st.text_input("State/Division Code (X)", value=current_data.get('NRC_state_division', ''))
+        with col2:
+            NRC_township = st.text_input("Township Code (XXX)", value=current_data.get('NRC_township', ''))
+        with col3:
+            NRC_sth = st.text_input("Classification Code ((Y))", value=current_data.get('NRC_sth', ''))
+        with col4:
+            NRC_no = st.text_input("6-Digit Number (######)", value=current_data.get('NRC_no', ''))
+
+        st.markdown("---")
+
+        # --- Personal Details (Burmese Script) ---
+        Name = st.text_input("Name (အမည်)", value=current_data.get('Name', ''))
+        Fathers_Name = st.text_input("Father's Name (အဘအမည်)", value=current_data.get('Fathers_Name', ''))
+        Date_of_Birth = st.text_input("Date of Birth (မွေးသက္ကရာဇ်)", value=current_data.get('Date_of_Birth', ''))
+
+        # Button to submit corrections
+        submitted = st.form_submit_button("Update and Re-Validate Extracted Data", type="secondary")
+        
+        if submitted:
+            fields_data = {
+                "NRC_state_division": NRC_state_division,
+                "NRC_township": NRC_township,
+                "NRC_sth": NRC_sth,
+                "NRC_no": NRC_no,
+                "Name": Name,
+                "Fathers_Name": Fathers_Name,
+                "Date_of_Birth": Date_of_Birth,
+            }
+            update_nrc_data_from_fields(fields_data)
+            st.rerun()
+
+# --- 4. Core AI Extraction Function ---
+
+def extract_kyc_data(enhanced_image_bytes: bytes, document_type: str) -> Optional[Dict[str, Any]]:
+    """Calls the Gemini API to extract structured data based on document type."""
+    
+    # Select specific configuration
+    if document_type == 'NRC':
+        schema = NRC_JSON_SCHEMA
+        user_query = NRC_USER_QUERY
+        system_instruction = NRC_SYSTEM_INSTRUCTION
+    elif document_type == 'Driving_License':
+        schema = DL_EXTRACTION_SCHEMA
+        user_query = DL_EXTRACTION_PROMPT
+        system_instruction = "You are an expert OCR system for extracting data from official documents. Follow all instructions precisely."
+    elif document_type == 'Passport':
+        schema = PP_EXTRACTION_SCHEMA
+        user_query = PP_EXTRACTION_PROMPT
+        system_instruction = "You are an expert OCR system for extracting data from official documents, especially focusing on biographical data and Machine Readable Zones (MRZ)."
+    else:
+        # Should not happen if UI is correctly gated
+        st.error("Invalid document type selected.")
+        return None
+        
+    base64_image = base64.b64encode(enhanced_image_bytes).decode('utf-8')
+    mime_type = "image/png" 
+    
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {"text": user_query},
+                    {"inlineData": {"mimeType": mime_type, "data": base64_image}}
+                ]
+            }
+        ],
+        "systemInstruction": {"parts": [{"text": system_instruction}]},
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": schema,
+            "temperature": 0.0 
+        }
+    }
+
+    try:
+        response = requests.post(
+            API_URL, 
+            params={'key': API_KEY},
+            headers={'Content-Type': 'application/json'}, 
+            json=payload
+        )
+        response.raise_for_status()
+        result = response.json()
+        
+        json_string = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text')
+        
+        if json_string:
+            extracted_data = json.loads(json_string)
+            st.session_state['original_data'] = extracted_data.copy()
+            st.session_state['document_mode'] = document_type # Store the mode for correct rendering
+            
+            # Run specific post-processing/validation
+            if document_type == 'NRC':
+                warnings = validate_nrc_data(extracted_data)
+                extracted_data['validation_warnings'] = warnings
+            
+            return extracted_data
+        else:
+            error_detail = result.get('candidates', [{}])[0].get('finishReason', 'No content generated.')
+            st.error(f"Error: Could not extract structured JSON. Finish Reason: {error_detail}")
+            return None
+
+    except Exception as e:
+        st.error(f"An unexpected error occurred during API call: {e}")
+        return None
+
+# --- 5. UI Rendering Functions ---
+
+def render_passport_results(data: Dict[str, Any]):
+    """Renders passport results and runs MRZ checksum validation."""
+    
+    st.header("Results: Passport Data Extraction")
+    
+    passport_no_data = data.get('passport_no', '').replace('<', '')
+    extracted_checksum = data.get('passport_no_checksum', '')
+    calculated_checksum = calculate_mrz_checksum(passport_no_data)
+    
+    checksum_verified = (calculated_checksum == extracted_checksum) and (extracted_checksum != "")
+    verification_status = "✅ VERIFIED (Checksum Matched)" if checksum_verified else "⚠️ WARNING: CHECKSUM MISMATCH"
+    
+    st.subheader("Verification Status")
+    if checksum_verified:
+        st.success(verification_status)
+    else:
+        st.warning(verification_status)
+        st.error(f"Extracted Checksum: **{extracted_checksum}** | Calculated Checksum: **{calculated_checksum}**")
+
+    # Display in a simple table/list
+    data_view = [
+        ("Passport Type", data.get("type", "N/A")),
+        ("Passport No", data.get("passport_no", "N/A")),
+        ("Name", data.get("name", "N/A")),
+        ("Date of Birth", data.get("date_of_birth", "N/A")),
+        ("Date of Expiry", data.get("date_of_expiry", "N/A")),
+        ("MRZ Full String", data.get("mrz_full_string", "N/A")),
+        ("Extraction Confidence", f"{data.get('extraction_confidence', 0.0):.2f}"),
+    ]
+    st.table(pd.DataFrame(data_view, columns=['Field', 'Value']))
+    
+
+def render_dl_results(data: Dict[str, Any]):
+    """Renders Driving License results."""
+    
+    st.header("Results: Driving License Data Extraction")
+    
+    confidence = data.get('extraction_confidence', 0.0)
+    st.metric(
+        label="Model Confidence",
+        value=f"{confidence * 100:.0f}%",
+        delta="AI's certainty of its initial output."
+    )
+    
+    # Display in a two-column format for English and Myanmar scripts
+    col_en, col_my = st.columns(2)
+    
+    with col_en:
+        st.subheader("Latin Script (English) Fields")
+        st.table([
+            ("License No", data.get("license_no", "N/A")),
+            ("Name", data.get("name", "N/A")),
+            ("NRC No (Latin)", data.get("nrc_no", "N/A")),
+            ("Date of Birth", data.get("date_of_birth", "N/A")),
+            ("Valid Up", data.get("valid_up", "N/A")),
+        ])
+    with col_my:
+        st.subheader("Myanmar Script (Burmese) Fields")
+        st.table([
+            ("အမည် (Name)", data.get("name_myanmar", "N/A")),
+            ("မှတ်ပုံတင် (NRC)", data.get("nrc_no_myanmar", "N/A")),
+            ("မွေးသက္ကရာဇ် (DOB)", data.get("date_of_birth_myanmar", "N/A")),
+            ("ကုန်ဆုံးရက် (Expiry)", data.get("valid_up_myanmar", "N/A")),
+            ("Blood Type", data.get("blood_type", "N/A")),
+        ])
+
+def render_nrc_results(data: Dict[str, Any]):
+    """Renders NRC results, validation, and the correction form (HITL)."""
+    
+    st.header("Results: NRC Data Extraction")
+    
+    warnings = data.get('validation_warnings', [])
+    confidence = data.get('Overall_Confidence_Score')
+    accuracy = st.session_state.get('accuracy_score', 1.0)
+    
+    # --- Performance Metrics Section ---
+    col_conf, col_acc = st.columns(2)
+    
+    with col_conf:
+        st.metric(
+            label="Model Confidence",
+            value=f"{confidence * 100:.0f}%" if confidence is not None else "N/A"
+        )
+    with col_acc:
+        st.metric(
+            label="OCR Field Accuracy",
+            value=f"{accuracy * 100:.2f}%",
+            delta="Similarity to the human-corrected output."
+        )
+
+    # 1. Validation Warnings
+    st.subheader("⚠️ 1. Validation Warnings")
+    if warnings:
+        st.warning("The extracted data has the following potential errors:")
+        for warning in warnings:
+            st.markdown(f"- **{warning}**")
+    else:
+        st.success("Data passed all preliminary validation checks.")
+    
+    st.markdown("---")
+
+    # 2. Extracted Data Snapshot
+    st.subheader("✅ 2. Extracted Data Snapshot")
+    final_data_view = [
+        ("NRC State/Division (X)", data.get("NRC_state_division", "N/A")),
+        ("NRC Township (XXX)", data.get("NRC_township", "N/A")),
+        ("NRC Classification ((Y))", data.get("NRC_sth", "N/A")),
+        ("NRC 6-Digit No (######)", data.get("NRC_no", "N/A")),
+        ("Name (အမည်)", data.get("Name", "N/A")),
+        ("Father's Name (အဘအမည်)", data.get("Fathers_Name", "N/A")),
+        ("Date of Birth (မွေးသက္ကရာဇ်)", data.get("Date_of_Birth", "N/A")),
+    ]
+    st.table(pd.DataFrame(final_data_view, columns=['Field', 'Value']))
+    
+    st.markdown("---")
+
+    # 3. Human-in-the-Loop Correction (Text Fields)
+    st.subheader("✍️ 3. Correct Data & Recalculate Accuracy (HITL)")
+    st.markdown("Review and correct any errors below to train the accuracy score.")
+    
+    with st.form("nrc_correction_form"):
+        current_data = st.session_state['extracted_data']
+        
+        # --- Granular NRC Fields ---
+        st.markdown("##### NRC Components (X/XXX(Y)######)")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            NRC_state_division = st.text_input("State/Division Code (X)", value=current_data.get('NRC_state_division', ''))
+        with col2:
+            NRC_township = st.text_input("Township Code (XXX)", value=current_data.get('NRC_township', ''))
+        with col3:
+            NRC_sth = st.text_input("Classification Code ((Y))", value=current_data.get('NRC_sth', ''))
+        with col4:
+            NRC_no = st.text_input("6-Digit Number (######)", value=current_data.get('NRC_no', ''))
+
+        st.markdown("---")
+
+        # --- Personal Details (Burmese Script) ---
+        Name = st.text_input("Name (အမည်)", value=current_data.get('Name', ''))
+        Fathers_Name = st.text_input("Father's Name (အဘအမည်)", value=current_data.get('Fathers_Name', ''))
+        Date_of_Birth = st.text_input("Date of Birth (မွေးသက္ကရာဇ်)", value=current_data.get('Date_of_Birth', ''))
+
+        # Button to submit corrections
+        submitted = st.form_submit_button("Update and Re-Validate Extracted Data", type="secondary")
+        
+        if submitted:
+            fields_data = {
+                "NRC_state_division": NRC_state_division,
+                "NRC_township": NRC_township,
+                "NRC_sth": NRC_sth,
+                "NRC_no": NRC_no,
+                "Name": Name,
+                "Fathers_Name": Fathers_Name,
+                "Date_of_Birth": Date_of_Birth,
+            }
+            update_nrc_data_from_fields(fields_data)
+            st.rerun()
+
+# --- 4. Core AI Extraction Function ---
+
+def extract_kyc_data(enhanced_image_bytes: bytes, document_type: str) -> Optional[Dict[str, Any]]:
+    """Calls the Gemini API to extract structured data based on document type."""
+    
+    # Select specific configuration
+    if document_type == 'NRC':
+        schema = NRC_JSON_SCHEMA
+        user_query = NRC_USER_QUERY
+        system_instruction = NRC_SYSTEM_INSTRUCTION
+    elif document_type == 'Driving_License':
+        schema = DL_EXTRACTION_SCHEMA
+        user_query = DL_EXTRACTION_PROMPT
+        system_instruction = "You are an expert OCR system for extracting data from official documents. Follow all instructions precisely."
+    elif document_type == 'Passport':
+        schema = PP_EXTRACTION_SCHEMA
+        user_query = PP_EXTRACTION_PROMPT
+        system_instruction = "You are an expert OCR system for extracting data from official documents, especially focusing on biographical data and Machine Readable Zones (MRZ)."
+    else:
+        # Should not happen if UI is correctly gated
+        st.error("Invalid document type selected.")
+        return None
+        
+    base64_image = base64.b64encode(enhanced_image_bytes).decode('utf-8')
+    mime_type = "image/png" 
+    
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {"text": user_query},
+                    {"inlineData": {"mimeType": mime_type, "data": base64_image}}
+                ]
+            }
+        ],
+        "systemInstruction": {"parts": [{"text": system_instruction}]},
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": schema,
+            "temperature": 0.0 
+        }
+    }
+
+    try:
+        response = requests.post(
+            API_URL, 
+            params={'key': API_KEY},
+            headers={'Content-Type': 'application/json'}, 
+            json=payload
+        )
+        response.raise_for_status()
+        result = response.json()
+        
+        json_string = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text')
+        
+        if json_string:
+            extracted_data = json.loads(json_string)
+            st.session_state['original_data'] = extracted_data.copy()
+            st.session_state['document_mode'] = document_type # Store the mode for correct rendering
+            
+            # Run specific post-processing/validation
+            if document_type == 'NRC':
+                warnings = validate_nrc_data(extracted_data)
+                extracted_data['validation_warnings'] = warnings
+            
+            return extracted_data
+        else:
+            error_detail = result.get('candidates', [{}])[0].get('finishReason', 'No content generated.')
+            st.error(f"Error: Could not extract structured JSON. Finish Reason: {error_detail}")
+            return None
+
+    except Exception as e:
+        st.error(f"An unexpected error occurred during API call: {e}")
+        return None
+
+# --- 6. Download Generation Functions ---
+
+def create_download_data():
+    """Prepares clean data for download and returns the necessary objects."""
+    download_data = st.session_state['extracted_data'].copy()
+    document_type = st.session_state['document_mode']
+    
+    # Remove transient Streamlit-specific keys
+    download_data.pop('validation_warnings', None)
+    
+    # Add NRC-specific accuracy score if applicable
+    if document_type == 'NRC':
+        download_data['OCR_Accuracy_Score'] = st.session_state.get('accuracy_score', 1.0)
+    
+    # 1. JSON
+    json_output = json.dumps(download_data, indent=2)
+    
+    # 2. Plain Text / Word (DOCX format)
+    text_output = f"--- {document_type.replace('_', ' ')} Extracted Data ---\n\n"
+    for key, value in download_data.items():
+        text_output += f"{key.replace('_', ' '):<30}: {value}\n"
+    text_output += f"\n--- End of Data ---\n"
+    
+    # 3. Excel (CSV format) - FIX: Use UTF-8 with BOM (utf-8-sig) for Excel compatibility
+    df = pd.DataFrame(download_data.items(), columns=['Field', 'Value'])
+    csv_buffer = io.BytesIO() 
+    # CRITICAL: Use 'utf-8-sig' (UTF-8 with BOM) for cross-platform Excel compatibility
+    df.to_csv(csv_buffer, index=False, encoding='utf-8-sig') 
+    csv_output = csv_buffer.getvalue() 
+    
+    return json_output, text_output, csv_output
+
+# --- 7. Main Application Flow ---
+
+def main():
     st.title("🛂 Unified KYC Document Extractor")
-    st.caption("Leveraging Gemini 2.5 Flash for structured data extraction from Myanmar IDs.")
+    st.caption("Extract structured data from Myanmar NRC, Driving License, and Passports.")
 
-    # --- Sidebar for selection and Upload ---
-    st.sidebar.header("Configuration")
+    # Check for API Key early
+    if not API_KEY:
+        st.warning("Please configure your API key in Streamlit secrets to enable extraction.")
     
-    # Selectbox for document type (limited to the three modes)
-    selected_mode = st.sidebar.selectbox(
-        "Select Document Type",
-        options=list(DOCUMENT_MODES.keys()),
-        format_func=lambda x: DOCUMENT_MODES[x],
-        key='current_document_selection',
-        on_change=reset_session_state_for_new_mode,
-        help="Select the type of document to be processed."
+    # --- Document Type Selector ---
+    document_type_options = ["--- Select Document Type ---", "NRC", "Driving_License", "Passport"]
+    
+    selected_document_type = st.sidebar.selectbox(
+        "Select Document Type for Scanning",
+        document_type_options,
+        key='current_document_selection', # Link selectbox to session state key
+        on_change=reset_session_state_for_new_mode, # Run reset function on change
+        format_func=lambda x: x.replace('_', ' ')
     )
     
-    # Check for mode change before processing upload
-    if st.session_state['document_mode'] != selected_mode:
-        st.session_state['document_mode'] = selected_mode # Update the mode tracker if reset_session_state_for_new_mode hasn't rerun yet
+    is_mode_selected = selected_document_type != "--- Select Document Type ---"
     
-    current_doc_type = st.session_state['document_mode']
+    st.sidebar.markdown("---")
     
-    uploaded_file = st.sidebar.file_uploader(
-        f"Upload {DOCUMENT_MODES.get(current_doc_type, 'Document')}", 
-        type=['png', 'jpg', 'jpeg'],
-        key='uploaded_file_ui'
-    )
-    
-    # --- File Upload Handling and Image Processing ---
-    if uploaded_file is not None:
-        if uploaded_file.name != st.session_state.get('uploaded_file_name'):
-            # New file uploaded or mode changed, read new bytes
-            st.session_state['uploaded_file_bytes'] = uploaded_file.getvalue()
-            st.session_state['uploaded_file_name'] = uploaded_file.name
-            st.session_state['extracted_data'] = None # Reset data on new upload
-            st.session_state['accuracy_score'] = None
-            st.session_state['current_image_bytes'] = None # Clear display image to trigger processing
+    # --- Check for uploaded image to show content ---
+    if is_mode_selected:
+        
+        st.sidebar.markdown(f"**Current Mode: {selected_document_type.replace('_', ' ')}**")
+        
+        # --- File/Camera Input ---
+        st.subheader(f"0. Upload or Capture {selected_document_type.replace('_', ' ')}")
+        tab1, tab2 = st.tabs(["🖼️ Upload Image", "📸 Take Photo"])
 
-        # Only process if image bytes are available
-        if st.session_state['current_image_bytes'] is None and st.session_state['uploaded_file_bytes']:
-            # Run initial processing (EXIF rotation + conditional enhancement)
-            with st.spinner(f"Processing image for {DOCUMENT_MODES[current_doc_type]}..."):
-                enhanced_bytes = process_image(st.session_state['uploaded_file_bytes'], current_doc_type)
+        uploaded_file = None
+        
+        with tab1:
+            uploaded_file_widget = st.file_uploader(f"Upload {selected_document_type.replace('_', ' ')} Image", type=["png", "jpg", "jpeg"])
+        with tab2:
+            camera_image_widget = st.camera_input(f"Take a Photo of {selected_document_type.replace('_', ' ')}")
+
+        if uploaded_file_widget:
+            uploaded_file = uploaded_file_widget
+        elif camera_image_widget:
+            uploaded_file = camera_image_widget
+        
+        
+        if uploaded_file:
+            file_name_or_default = getattr(uploaded_file, 'name', 'camera_image_file')
+
+            # Only update session state bytes if a new file/photo is detected
+            if st.session_state.get('uploaded_file_name') != file_name_or_default: 
+                # Reset display image and clear old results when a new image is loaded
+                st.session_state['uploaded_file_bytes'] = uploaded_file.getvalue()
+                st.session_state['uploaded_file_name'] = file_name_or_default
+                st.session_state['current_image_bytes'] = st.session_state['uploaded_file_bytes']
+                st.session_state['extracted_data'] = None
+                st.session_state['accuracy_score'] = 1.0
+                st.session_state['enhanced_image_bytes'] = None
+                st.rerun()
+
+    
+    if st.session_state.get('uploaded_file_bytes') and is_mode_selected:
+        image_bytes_to_display = st.session_state['current_image_bytes']
+        
+        # --- Rotation Controls ---
+        st.subheader("1. Correct Orientation (If needed)")
+        col_rot1, col_rot2, col_rot3, col_rot4 = st.columns([1, 1, 1, 3])
+        with col_rot1: st.button("Rotate ↺ -90°", on_click=rotate_uploaded_image, args=(90,), key='rot_neg90', help="Rotate Counter-Clockwise 90°")
+        with col_rot2: st.button("Rotate ↻ +90°", on_click=rotate_uploaded_image, args=(-90,), key='rot_pos90', help="Rotate Clockwise 90°")
+        with col_rot3: st.button("Rotate 180°", on_click=rotate_uploaded_image, args=(180,), key='rot_180', help="Rotate 180°")
+        with col_rot4: st.info("The image below shows the *current* orientation (after auto-EXIF correction).")
+
+        # --- Image Display Tabs ---
+        img_tab1, img_tab2 = st.tabs(["Current Oriented Image", "AI Processed Image (Enhanced)"])
+        
+        with img_tab1:
+            st.image(image_bytes_to_display, caption='Current Input Document', use_column_width=True)
+
+        with img_tab2:
+            if st.session_state.get('enhanced_image_bytes') is not None:
+                st.image(st.session_state['enhanced_image_bytes'], caption='AI Optimized Image', use_column_width=True)
+            else:
+                st.info("The AI processed image preview will appear here after extraction.")
+
+        st.divider()
+
+        # Button to trigger extraction
+        if st.button(f"2. Extract & Validate {selected_document_type.replace('_', ' ')} Data", type="primary"):
+            
+            if not API_KEY:
+                st.error("Cannot proceed: API Key is not configured.")
+                return
+
+            st.session_state['extracted_data'] = None 
+            st.session_state['accuracy_score'] = 1.0
+            
+            with st.spinner(f"Processing image and calling Gemini for {selected_document_type.replace('_', ' ')}..."):
+                # 3. Run the image through the pipeline for enhancement and orientation
+                enhanced_bytes = process_image(st.session_state['uploaded_file_bytes'], selected_document_type)
                 st.session_state['enhanced_image_bytes'] = enhanced_bytes
+                
+                # 4. Perform the extraction
+                extracted_data = extract_kyc_data(enhanced_bytes, selected_document_type)
             
-            # Note: A rerun is triggered by rotation changes, so we rely on session state after this block.
+            if extracted_data:
+                st.session_state['extracted_data'] = extracted_data
+                st.rerun() 
+                
+        st.divider()
 
-        # --- Layout for Image and Results ---
-        col_img, col_results = st.columns([1, 1.5])
+    # --- Conditional Results Display ---
+    # This section only renders if data is extracted AND the mode matches the current selection
+    
+    if st.session_state['extracted_data'] is not None and st.session_state['document_mode'] == selected_document_type:
+        
+        st.header("Extracted Data Results")
+        
+        if selected_document_type == 'NRC':
+            render_nrc_results(st.session_state['extracted_data'])
+        elif selected_document_type == 'Driving_License':
+            render_dl_results(st.session_state['extracted_data'])
+        elif selected_document_type == 'Passport':
+            render_passport_results(st.session_state['extracted_data'])
 
-        with col_img:
-            st.subheader("Original Image & Controls")
-            
-            # Display the current image (after rotation/EXIF fix)
-            display_bytes = st.session_state.get('current_image_bytes', st.session_state['uploaded_file_bytes'])
-            st.image(display_bytes, caption=uploaded_file.name, use_column_width=True)
-            
-            # Rotation Controls
-            rot_col1, rot_col2 = st.columns(2)
-            with rot_col1:
-                st.button("Rotate Left  counter-clockwise", on_click=rotate_uploaded_image, args=(-90,), use_container_width=True)
-            with rot_col2:
-                st.button("Rotate Right clockwise", on_click=rotate_uploaded_image, args=(90,), use_container_width=True)
+        # --- Download Logic ---
+        st.subheader("💾 Download Extracted Data")
+        
+        json_output, text_output, csv_output = create_download_data()
+        
+        col_dl1, col_dl2, col_dl3, col_dl4 = st.columns(4)
 
-            if current_doc_type == 'NRC' and st.session_state.get('enhanced_image_bytes'):
-                with st.expander("View Enhanced Image (for AI input)"):
-                    st.image(st.session_state['enhanced_image_bytes'], caption="Sharpened/Contrast-Adjusted Image (Grayscale)", use_column_width=True)
-
-        with col_results:
-            st.subheader(f"Extraction Results for {DOCUMENT_MODES[current_doc_type]}")
+        with col_dl1:
+            st.download_button(
+                label=f"⬇️ JSON",
+                data=json_output,
+                file_name=f"{selected_document_type.lower()}_data.json",
+                mime="application/json",
+                key='dl_json',
+                type='secondary'
+            )
+        with col_dl2:
+            st.download_button(
+                label=f"⬇️ Plain Text",
+                data=text_output,
+                file_name=f"{selected_document_type.lower()}_data.txt",
+                mime="text/plain",
+                key='dl_text',
+                type='secondary'
+            )
+        with col_dl3:
+            # Labeled as Word/DOCX for user experience, content is easy-to-read text
+            st.download_button(
+                label=f"⬇️ Word/DOCX",
+                data=text_output,
+                file_name=f"{selected_document_type.lower()}_report.doc", 
+                mime="application/msword",
+                key='dl_word',
+                type='secondary'
+            )
+        with col_dl4:
+            st.download_button(
+                label=f"⬇️ Excel (CSV)",
+                data=csv_output,
+                file_name=f"{selected_document_type.lower()}_data.csv",
+                mime="text/csv",
+                key='dl_csv',
+                type='secondary'
+            )
             
-            # --- Extraction Trigger ---
-            if st.session_state['extracted_data'] is None:
-                if st.button(f"Start Structured Extraction", type="primary", use_container_width=True):
-                    with st.spinner(f"Requesting data extraction for {current_doc_type} via Gemini..."):
-                        extracted_data = extract_kyc_data(st.session_state['enhanced_image_bytes'], current_doc_type)
-                        if extracted_data:
-                            st.session_state['extracted_data'] = extracted_data
-                            # For NRC, initialize accuracy to 1.0 (perfect before human correction)
-                            if current_doc_type == 'NRC':
-                                st.session_state['accuracy_score'] = 1.0
-                            st.rerun() # Rerun to display results
-                else:
-                    st.info("Click 'Start Structured Extraction' to analyze the image.")
-            
-            # --- Results Rendering ---
-            if st.session_state['extracted_data']:
-                if current_doc_type == 'NRC':
-                    render_nrc_results(st.session_state['extracted_data'])
-                elif current_doc_type == 'Driving_License':
-                    render_dl_results(st.session_state['extracted_data'])
-                elif current_doc_type == 'Passport':
-                    render_passport_results(st.session_state['extracted_data'])
+        st.markdown("---")
+    
+    elif not is_mode_selected:
+         st.info("Please select a KYC document type from the sidebar to begin.")
 
     else:
-        st.info(f"Please use the sidebar to select the document type ({DOCUMENT_MODES[current_doc_type]} selected) and upload an image file to begin.")
-
+        # State when mode is selected but no data is uploaded/extracted yet
+        if not st.session_state.get('uploaded_file_bytes'):
+            st.info(f"Ready for scan. Use the tabs above to upload or capture a {selected_document_type.replace('_', ' ')} image.")
+        # If an image is uploaded but extraction hasn't been run
+        elif not st.session_state.get('extracted_data'):
+             st.info(f"Image uploaded. Click '2. Extract & Validate {selected_document_type.replace('_', ' ')} Data' to proceed.")
 
 if __name__ == "__main__":
-    main_app()
+    main()
